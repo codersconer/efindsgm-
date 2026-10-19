@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+export async function hashPassword(password: string) {
+  const data = new TextEncoder().encode(password);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+const SECRET = "efindsgm-gambia-2026-codersconer";
+export async function createToken(userId: string) {
+  const header = btoa(JSON.stringify({alg:"HS256",typ:"JWT"}));
+  const payload = btoa(JSON.stringify({userId, exp: Date.now() + 1000*60*60*24*7}));
+  const d = `${header}.${payload}`;
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(SECRET), {name:"HMAC",hash:"SHA-256"}, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(d));
+  const signature = btoa(String.fromCharCode(...new Uint8Array(sig)));
+  return `${d}.${signature}`;
+}
+export async function verifyToken(token: string) {
+  try {
+    const [h,p,s] = token.split('.');
+    const d = `${h}.${p}`;
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(SECRET), {name:"HMAC",hash:"SHA-256"}, false, ["verify"]);
+    const sigBytes = Uint8Array.from(atob(s), c=>c.charCodeAt(0));
+    const valid = await crypto.subtle.verify("HMAC", key, sigBytes, new TextEncoder().encode(d));
+    if(!valid) return null;
+    const decoded = JSON.parse(atob(p));
+    if(decoded.exp < Date.now()) return null;
+    return decoded.userId;
+  } catch { return null; }
+}
+import "./globals.css";
+export const metadata = { title: "efindsgm.is-a.dev - Find Any Skill in Gambia" };
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en"><body className="bg-gray-50">
+      <header className="bg-white shadow sticky top-0 z-50">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex justify-between items-center">
+          <a href="/" className="font-black text-xl text-blue-600">efinds<span className="text-yellow-500">gm</span>.is-a.dev</a>
+          <nav className="flex gap-2 text-sm"><a href="/search" className="px-3 py-2 bg-gray-100 rounded-full">Search</a><a href="/post-job" className="px-3 py-2 bg-gray-900 text-white rounded-full">Post Job</a><a href="/post-skill" className="px-3 py-2 bg-blue-600 text-white rounded-full">Post Skill</a><a href="/login">Login</a></nav>
+        </div>
+      </header>
+      <main className="max-w-6xl mx-auto px-4 py-6">{children}</main>
+      <footer className="text-center py-6 text-xs text-gray-500">© 2026 efindsgm.is-a.dev by @codersconer - Sukuta</footer>
+    </body></html>
+  );
+}
+const CATS = ["Construction","Tailoring","IT","Taxi Driving","Carpentery","Welding","Electrician","Plumbing","Satellite Installation","Job Hirings","Graphic Designers","Photographers","Video Editors","Barbers","Mechanics"];
+export default function Home(){
+  return (<div>
+    <div className="relative rounded-3xl overflow-hidden my-4"><img src="/banner.jpg" className="w-full h-[400px] object-cover"/><div className="absolute inset-0 bg-black/20"></div><div className="absolute bottom-6 left-0 right-0 px-4"><h1 className="text-white text-3xl font-bold text-center">Find Any Skill in Gambia</h1><form action="/search" className="mt-4 flex max-w-xl mx-auto bg-white rounded-full p-2"><input name="q" placeholder="Search skill..." className="flex-1 px-4 outline-none"/><button className="bg-blue-600 text-white px-6 rounded-full">Search</button></form></div></div>
+    <h2 className="font-bold my-4">Categories</h2><div className="grid grid-cols-2 md:grid-cols-5 gap-2">{CATS.map(c=><a key={c} href={`/search?category=${c}`} className="bg-white p-4 rounded-xl shadow border text-sm text-center">{c}</a>)}</div>
+  </div>);
+}
+import { getRequestContext } from "@cloudflare/next-on-pages"; import { hashPassword, createToken } from "@/lib/auth";
+export async function POST(req: Request){
+  const { env } = getRequestContext(); const { name, phone, whatsapp, password, location } = await req.json();
+  const existing = await env.DB.prepare("SELECT id FROM users WHERE phone=?").bind(phone).first();
+  if(existing) return Response.json({error:"Phone already used"},{status:400});
+  const id = crypto.randomUUID(); const password_hash = await hashPassword(password);
+  await env.DB.prepare("INSERT INTO users (id,name,phone,whatsapp,password_hash,location,created_at) VALUES (?,?,?,?,?,?,?)").bind(id,name,phone,whatsapp,password_hash,location,Date.now()).run();
+  const token = await createToken(id); const res = Response.json({ok:true}); res.headers.set("Set-Cookie",`token=${token}; Path=/; HttpOnly; Max-Age=604800`); return res;
+}
+import { getRequestContext } from "@cloudflare/next-on-pages"; import { verifyToken } from "@/lib/auth";
+export async function GET(req: Request){
+  const { env } = getRequestContext(); const cookie = req.headers.get("Cookie")||""; const token = cookie.split("token=")[1]?.split(";")[0];
+  if(!token) return Response.json({user:null}); const userId = await verifyToken(token); if(!userId) return Response.json({user:null});
+  const user = await env.DB.prepare("SELECT id,name,phone,whatsapp,location FROM users WHERE id=?").bind(userId).first(); return Response.json({user});
+}
+import { getRequestContext } from "@cloudflare/next-on-pages"; import { verifyToken } from "@/lib/auth";
+export async function POST(req: Request){
+  const { env } = getRequestContext(); const cookie = req.headers.get("Cookie")||""; const token = cookie.split("token=")[1]?.split(";")[0]; const userId = token?await verifyToken(token):null;
+  if(!userId) return Response.json({error:"Login first"},{status:401}); const body:any=await req.json(); const user=await env.DB.prepare("SELECT * FROM users WHERE id=?").bind(userId).first();
+  const id=crypto.randomUUID(); await env.DB.prepare("INSERT INTO skills (id,user_id,title,category,description,price,location,whatsapp,phone,name,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)").bind(id,userId,body.title,body.category,body.description,body.price,body.location,body.whatsapp,body.phone,user.name,Date.now()).run(); return Response.json({ok:true});
+}
+import { getRequestContext } from "@cloudflare/next-on-pages"; import { verifyToken } from "@/lib/auth";
+export async function POST(req: Request){
+  const { env } = getRequestContext(); const cookie = req.headers.get("Cookie")||""; const token = cookie.split("token=")[1]?.split(";")[0]; const userId = token?await verifyToken(token):null;
+  if(!userId) return Response.json({error:"Login first"},{status:401}); const body:any=await req.json(); const user=await env.DB.prepare("SELECT * FROM users WHERE id=?").bind(userId).first();
+  const id=crypto.randomUUID(); await env.DB.prepare("INSERT INTO jobs (id,user_id,title,category,description,budget,location,whatsapp,phone,name,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)").bind(id,userId,body.title,body.category,body.description,body.budget,body.location,body.whatsapp,body.phone,user.name,Date.now()).run(); return Response.json({ok:true});
+}
+import { getRequestContext } from "@cloudflare/next-on-pages";
+export async function GET(req: Request){
+  const { env } = getRequestContext(); const { searchParams } = new URL(req.url);
+  const q=searchParams.get("q")||""; const category=searchParams.get("category")||""; const location=searchParams.get("location")||""; const type=searchParams.get("type")||"skills";
+  let cond=[]; let binds:any[]=[]; if(q){cond.push("(title LIKE ? OR description LIKE ?)"); binds.push(`%${q}%`,`%${q}%`);} if(category&&category!="All"){cond.push("category=?"); binds.push(category);} if(location&&location!="All"){cond.push("location LIKE ?"); binds.push(`%${location}%`);}
+  let sql=`SELECT * FROM ${type==="jobs"?"jobs":"skills"} ${cond.length?"WHERE "+cond.join(" AND "):""} ORDER BY created_at DESC LIMIT 50`;
+  const {results}=await env.DB.prepare(sql).bind(...binds).all(); return Response.json(results);
+}
+import { getRequestContext } from "@cloudflare/next-on-pages";
+export async function POST(req: Request){ const { env }=getRequestContext(); const {id,type}=await req.json(); await env.DB.prepare(`DELETE FROM ${type==="jobs"?"jobs":"skills"} WHERE id=?`).bind(id).run(); return Response.json({ok:true}); }
